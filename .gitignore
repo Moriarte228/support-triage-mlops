@@ -1,0 +1,23 @@
+# Secrets
+.env
+airflow/.env
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
+.ruff_cache/
+
+# Data & ML artifacts
+data/
+models/
+mlruns/
+mlartifacts/
+mlflow.db
+
+# Airflow runtime
+airflow/logs/
+airflow/plugins/
+airflow/config/
