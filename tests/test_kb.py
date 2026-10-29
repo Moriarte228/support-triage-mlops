@@ -28,7 +28,9 @@ def chunks(docs):
 
 
 def test_every_article_file_is_loaded(docs):
-    article_files = [path for path in KB_DIR.glob("*.md") if path.name.lower() != "readme.md"]
+    article_files = [
+        path for path in KB_DIR.glob("*.md") if path.name.lower() != "readme.md"
+    ]
     assert len(docs) == len(article_files)
 
 
@@ -43,21 +45,26 @@ def test_chunk_ids_are_unique(chunks):
     duplicates = sorted({chunk_id for chunk_id in ids if ids.count(chunk_id) > 1})
     assert not duplicates, f"duplicate chunk ids: {duplicates}"
 
+
 def test_chunk_text_is_clean(chunks):
     empty = [chunk.id for chunk in chunks if not chunk.text.split("\n", 1)[-1].strip()]
     with_labels = [chunk.id for chunk in chunks if "<!--" in chunk.text]
     assert not empty, f"chunks with an empty body: {empty}"
     assert not with_labels, f"chunks with leftover labels: {with_labels}"
 
+
 def test_every_chunk_has_intents(chunks):
     i = 0
     for chunk in chunks:
-        intents = chunk.metadata.get('intents', [])
+        intents = chunk.metadata.get("intents", [])
         if len(intents) == 0:
             i += 1
     assert i == 0, f"Chunks that doesn't have intents: {i}"
 
-@pytest.mark.skipif(not TRAIN.exists(), reason="no training data: run python -m src.prepare_data")
+
+@pytest.mark.skipif(
+    not TRAIN.exists(), reason="no training data: run python -m src.prepare_data"
+)
 def test_all_train_intents_covered(chunks):
     train_intents = set(pd.read_csv(TRAIN)["intent"])
     covered = {intent for chunk in chunks for intent in chunk.metadata["intents"]}
