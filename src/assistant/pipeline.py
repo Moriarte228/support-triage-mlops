@@ -12,12 +12,13 @@ import json
 import logging
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from src.assistant.kb.store import load_chunks
-from src.assistant.llm import BedrockClient, LLMClient
+from src.assistant.llm import BedrockClient, LLMClient, ToolRunner
 from src.assistant.retrieval import Hit, Retriever, get_retriever
+from src.assistant.tools import run_tool, tool_config, tools_for_texts
 from src.preprocess import normalize
 
 logger = logging.getLogger(__name__)
@@ -27,8 +28,8 @@ PROMPTS_DIR = ROOT / "prompts"
 INDEX = ROOT / "data" / "index" / "heading" / "chunks.jsonl"
 
 AMBIGUOUS_NOTE = "The question is ambiguous between the sections above."
-_SOURCES_LINE = re.compile(r"^\s*SOURCES:\s*(.*?)\s*$", flags=re.IGNORECASE | re.MULTILINE)
-
+_SOURCES = re.compile(r"SOURCES:[ \t]*([^\n]*)", flags=re.IGNORECASE)  # the model may put it on the last line or not
+_SECTION_ID = re.compile(r"^[\w-]+#[\w-]+$")
 
 @dataclass
 class RouteConfig:
@@ -52,6 +53,8 @@ class AnswerResult:
     llm_latency_s: float
     model: str
     prompt_version: str
+    tools_offered: list[str] = field(default_factory=list)  # tools the model was allowed to call
+    tool_calls: list[dict] = field(default_factory=list)     # tools the model used: name, input, output
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -85,20 +88,24 @@ def build_user_message(query: str, hits: list[Hit], route: str) -> str:
 
 
 def parse_sources(text: str) -> tuple[str, list[str]]:
-    """Split the reply into the answer and the section ids from its last SOURCES line."""
-    matches = list(_SOURCES_LINE.finditer(text))
+    """Split the reply into the answer and the section ids from its last SOURCES: list."""
+    matches = list(_SOURCES.finditer(text))
     if not matches:
         return text.strip(), []
     last = matches[-1]
+    parts = [part.strip(" .`*") for part in last.group(1).split(",")]
+    parts = [part for part in parts if part]
+    ids = [part for part in parts if _SECTION_ID.match(part)]
+    if not ids and [part.lower() for part in parts] != ["none"]:
+        return text.strip(), []  # "sources:" inside an ordinary sentence, not our list
     answer = (text[: last.start()] + text[last.end():]).strip()
-    ids = [part.strip() for part in last.group(1).split(",")]
-    return answer, [i for i in ids if i and i.lower() != "none"]
-
+    return answer, ids
 
 def log_answer(result: AnswerResult) -> None:
     """One JSON line per answer. The answer text is not logged; digits in the query are masked."""
-    record = {k: v for k, v in result.to_dict().items() if k not in ("query", "answer")}
+    record = {k: v for k, v in result.to_dict().items() if k not in ("query", "answer", "tool_calls")}
     record["query"] = normalize(result.query)
+    record["tools"] = [{"name": call["name"], "input": call["input"]} for call in result.tool_calls]
     logger.info(json.dumps({"event": "answer", **record}))
 
     unknown = sorted(set(result.cited) - set(result.sections))
@@ -117,22 +124,38 @@ class Assistant:
         llm: LLMClient,
         prompt_version: str = "answer_v1",
         config: RouteConfig | None = None,
+        tool_runner: ToolRunner | None = None,
+        tool_selection: str = "sections",
     ):
         self.retriever = retriever
         self.llm = llm
         self.prompt_version = prompt_version
         self.system_prompt = load_prompt(prompt_version)
         self.config = config or RouteConfig()
+        self.tool_runner = tool_runner        # runs the tool the model asked for; None: no tools at all
+        self.tool_selection = tool_selection  # "sections": only the tools the sections refer to; "all": every tool
+
+    def tools_for(self, route: str, used: list[Hit]) -> dict | None:
+        """toolConfig for this answer, or None when the model gets no tools."""
+        if self.tool_runner is None:
+            return None
+        if self.tool_selection == "all" or route != "answer":
+            return tool_config()  # unsure which section is right: keep every tool as a safety net
+        return tool_config(tools_for_texts([hit.chunk.text for hit in used]))
 
     def answer(self, query: str) -> AnswerResult:
         start = time.perf_counter()
         hits = self.retriever.retrieve(query, k=self.config.fallback_k)
         route = choose_route(hits, self.config)
         used = sections_for_route(hits, route, self.config)
+        tools = self.tools_for(route, used)
 
         reply = self.llm.chat(
             [{"role": "user", "content": build_user_message(query, used, route)}],
             system=self.system_prompt,
+            temperature=0.0 if tools else 0.2,  # tool calls are more reliable with greedy decoding
+            tool_config=tools,
+            run_tool=self.tool_runner if tools else None,
         )
         text, cited = parse_sources(reply.text)
 
@@ -149,21 +172,25 @@ class Assistant:
             llm_latency_s=reply.latency_s,
             model=reply.model,
             prompt_version=self.prompt_version,
+            tools_offered=[tool["toolSpec"]["name"] for tool in tools["tools"]] if tools else [],
+            tool_calls=reply.tool_calls,
         )
         log_answer(result)
         return result
 
 
-def build_assistant(prompt_version: str = "answer_v1") -> Assistant:
-    """The default assistant: intent retriever over the heading index + Bedrock."""
+def build_assistant(prompt_version: str = "answer_v3", use_tools: bool = True) -> Assistant:
+    """The default assistant: intent retriever over the heading index + Bedrock + database tools."""
     retriever = get_retriever("intent", load_chunks(INDEX))
-    return Assistant(retriever, BedrockClient(), prompt_version=prompt_version)
+    tool_runner = run_tool if use_tools else None
+    return Assistant(retriever, BedrockClient(), prompt_version=prompt_version, tool_runner=tool_runner)
 
 
 if __name__ == "__main__":
     import sys
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    logging.getLogger("botocore").setLevel(logging.WARNING)
     question = " ".join(sys.argv[1:]) or "I want to close my account"
     result = build_assistant().answer(question)
     print(result.answer)
