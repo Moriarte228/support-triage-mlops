@@ -7,6 +7,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       ASSISTANT_DB_PASSWORD: ${ASSISTANT_DB_PASSWORD}
+      ETL_DB_PASSWORD: ${ETL_DB_PASSWORD}
     ports:
       - "127.0.0.1:5434:5432"   # only reachable from this computer
     volumes:
@@ -17,6 +18,28 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    networks: [default, acme-net]
+
+  mlflow:
+    build: ./mlflow
+    container_name: acme-mlflow
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/mlartifacts
+    environment:
+      # Host names the server accepts: the browser on this computer and the Airflow containers.
+      MLFLOW_SERVER_ALLOWED_HOSTS: "localhost:*,127.0.0.1:*,acme-mlflow:5000"
+    ports:
+      - "127.0.0.1:5000:5000"
+    volumes:
+      - ./mlflow.db:/mlflow/mlflow.db          # the same runs you already have
+      - ./mlartifacts:/mlflow/mlartifacts
+    networks: [default, acme-net]
 
 volumes:
   pgdata:
+
+networks:
+  acme-net:
+    name: acme-net   # shared with the Airflow containers (airflow/docker-compose.yaml)

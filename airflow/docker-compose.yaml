@@ -49,8 +49,9 @@ x-airflow-common:
   # In order to add custom dependencies or upgrade provider distributions you can use your extended image.
   # Comment the image line, place your Dockerfile in the directory where you placed the docker-compose.yaml
   # and uncomment the "build" line below, Then run `docker-compose build` to build the images.
-  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.3.0}
-  # build: .
+  # Our image: Airflow + scikit-learn, mlflow-skinny, pandas (see Dockerfile).
+  image: acme-airflow:3.3.0
+  build: .
   env_file:
     - ${ENV_FILE_PATH:-.env}
   environment:
@@ -62,7 +63,9 @@ x-airflow-common:
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ${FERNET_KEY}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
-    AIRFLOW__CORE__LOAD_EXAMPLES: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    # Project code is mounted at /opt/airflow/project (see volumes), so DAGs can `import src...`.
+    PYTHONPATH: /opt/airflow/project
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
     AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET:-airflow_jwt_secret}
     AIRFLOW__API_AUTH__JWT_ISSUER: ${AIRFLOW__API_AUTH__JWT_ISSUER:-airflow}
@@ -81,7 +84,13 @@ x-airflow-common:
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ../src:/opt/airflow/project/src:ro
+    - ../data:/opt/airflow/project/data:ro
   user: "${AIRFLOW_UID:-50000}:0"
+  # default: Airflow's own Postgres and Redis; acme-net: our database and MLflow.
+  networks:
+    - default
+    - acme-net
   depends_on:
     &airflow-common-depends-on
     redis:
@@ -335,3 +344,7 @@ services:
 
 volumes:
   postgres-db-volume:
+
+networks:
+  acme-net:
+    external: true   # created by the project's docker-compose.yml
